@@ -5,23 +5,36 @@
     <!-- Leaflet Map CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        body { margin: 0; font-family: sans-serif; height: 100vh; display: flex; flex-direction: column; }
+        body { margin: 0; font-family: sans-serif; height: 100vh; display: flex; flex-direction: column; background: #111; }
         
         /* TABS */
-        #tabs { display: flex; height: 50px; background: #333; }
-        .tab { flex: 1; color: white; border: none; background: none; font-size: 18px; font-weight: bold; }
-        .active { background: #555; border-bottom: 4px solid #4CAF50; }
+        #tabs { display: flex; height: 60px; background: #000; border-bottom: 1px solid #333; flex-shrink: 0; }
+        .tab { flex: 1; color: #888; border: none; background: none; font-size: 16px; font-weight: bold; }
+        .active { background: #222; color: white; border-bottom: 4px solid #00E676; }
 
         /* SCREENS */
-        .screen { display: none; flex: 1; height: 100%; }
+        .screen { display: none; flex: 1; height: 100%; position: relative; }
         #collect-screen { display: flex; flex-direction: column; }
         #map-screen { height: 100%; }
 
+        /* GPS STATUS BAR */
+        #gps-bar { 
+            padding: 15px; text-align: center; color: white; font-weight: bold; font-size: 18px;
+            transition: background 0.3s; flex-shrink: 0;
+        }
+        .gps-good { background: #2e7d32; }   /* Green */
+        .gps-med { background: #f57f17; }    /* Orange */
+        .gps-bad { background: #c62828; }    /* Red */
+
         /* COLLECT UI */
-        .big-btn { flex: 1; border: none; font-size: 40px; font-weight: bold; color: white; }
-        #btn-pothole { background-color: #D32F2F; }
-        #btn-bump { background-color: #FBC02D; color: black; }
-        #status { padding: 10px; text-align: center; background: #222; color: #fff; }
+        .big-btn { flex: 1; border: none; font-size: 32px; font-weight: 900; color: white; letter-spacing: 1px; }
+        #btn-pothole { background-color: #D32F2F; border-bottom: 4px solid #000; }
+        #btn-bump { background-color: #FBC02D; color: black; border-bottom: 4px solid #000; }
+        #btn-pothole:active { background-color: #b71c1c; transform: translateY(2px); }
+        #btn-bump:active { background-color: #f9a825; transform: translateY(2px); }
+
+        /* DOWNLOAD BUTTON */
+        #dl-btn { height: 60px; background: #333; color: white; border: none; font-size: 16px; font-weight: bold; flex-shrink: 0; }
 
         /* MAP UI */
         #map { height: 100%; width: 100%; }
@@ -32,15 +45,23 @@
     <!-- NAVIGATION TABS -->
     <div id="tabs">
         <button class="tab active" onclick="switchTab('collect')">COLLECT</button>
-        <button class="tab" onclick="switchTab('map')">VIEW MAP</button>
+        <button class="tab" onclick="switchTab('map')">MAP VIEW</button>
     </div>
 
     <!-- SCREEN 1: COLLECTOR -->
     <div id="collect-screen" class="screen" style="display: flex;">
-        <div id="status">Ready. GPS Accuracy: <span id="acc">Wait...</span></div>
+        
+        <!-- GPS STATUS METER -->
+        <div id="gps-bar" class="gps-bad">
+            <span id="gps-text">Waiting for Satellite...</span>
+            <div style="font-size:12px; font-weight:normal; margin-top:5px; line-height: 1.5;" id="gps-details">
+                Accuracy: --
+            </div>
+        </div>
+
         <button class="big-btn" id="btn-pothole" onclick="saveHazard('POTHOLE')">POTHOLE</button>
-        <button class="big-btn" id="btn-bump" onclick="saveHazard('BUMP')">BUMP</button>
-        <button onclick="downloadCSV()" style="padding: 15px; font-size: 16px;">Download CSV</button>
+        <button class="big-btn" id="btn-bump" onclick="saveHazard('BUMP')">SPEED BUMP</button>
+        <button id="dl-btn" onclick="downloadCSV()">Download CSV (0 points)</button>
     </div>
 
     <!-- SCREEN 2: MAP -->
@@ -51,75 +72,162 @@
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // DATA STORAGE
-        let hazards = []; // Stores {lat, lng, type, heading}
+        // --- DATA STORAGE ---
+        let hazards = [];
         let map, userMarker;
-        let currentHeading = 0; // Direction of travel
-        let lastPos = null;
+        
+        // --- SENSOR VARIABLES ---
+        let gpsHeading = 0;      // From Satellite (Course over ground)
+        let compassHeading = 0;  // From Magnetometer (Phone direction)
+        
+        let lastAcc = 999;
+        let lastLat = 0, lastLng = 0;
 
-        // 1. INITIALIZE MAP
-        function initMap() {
-            if (map) return; // Already loaded
-            map = L.map('map').setView([12.9716, 77.5946], 15); // Bangalore
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '© OpenStreetMap'
-            }).addTo(map);
-        }
-
-        // 2. WATCH GPS (Runs constantly)
+        // --- 1. WATCH GPS (Position + GPS Bearing) ---
+        // highAccuracy: true forces the GPS chip to turn on
+        const gpsOptions = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
+        
         navigator.geolocation.watchPosition((pos) => {
-            const lat = pos.coords.latitude;
-            const lng = pos.coords.longitude;
-            const acc = pos.coords.accuracy;
-            const speed = pos.coords.speed; // m/s
+            lastLat = pos.coords.latitude;
+            lastLng = pos.coords.longitude;
+            lastAcc = pos.coords.accuracy;
             
-            // Calculate Heading (if moving)
-            if (pos.coords.heading) {
-                currentHeading = pos.coords.heading;
+            // GPS Heading only exists if moving > 3km/h
+            if (pos.coords.heading !== null && !isNaN(pos.coords.heading)) {
+                gpsHeading = pos.coords.heading;
             }
 
-            // Update UI
-            document.getElementById('acc').innerText = Math.round(acc) + "m";
+            updateUI();
+            updateMap(lastLat, lastLng);
+
+        }, (err) => {
+            document.getElementById('gps-text').innerText = "GPS ERROR: " + err.message;
+            document.getElementById('gps-bar').className = 'gps-bad';
+        }, gpsOptions);
+
+        // --- 2. WATCH COMPASS (Phone Orientation) ---
+        // Tries 'absolute' first (Android), falls back to standard (iOS/others)
+        if (window.DeviceOrientationEvent) {
+            window.addEventListener('deviceorientationabsolute', handleOrientation, true); 
+            window.addEventListener('deviceorientation', handleOrientation, true);
+        }
+
+        function handleOrientation(event) {
+            let h = null;
             
-            // Update Map Marker
+            // iOS (Webkit)
+            if (event.webkitCompassHeading) {
+                h = event.webkitCompassHeading;
+            } 
+            // Android (Absolute Alpha)
+            else if (event.alpha !== null) {
+                // Convert anti-clockwise alpha to clockwise heading
+                h = 360 - event.alpha; 
+            }
+
+            if (h !== null) {
+                compassHeading = h % 360;
+                if (compassHeading < 0) compassHeading += 360;
+            }
+            // Note: We don't call updateUI() here to save battery. 
+            // The UI updates only when GPS updates (approx 1Hz).
+        }
+
+        // --- 3. UI UPDATER ---
+        function updateUI() {
+            const bar = document.getElementById('gps-bar');
+            const txt = document.getElementById('gps-text');
+            const det = document.getElementById('gps-details');
+
+            // Display both headings for debugging
+            det.innerHTML = `Acc: ±${Math.round(lastAcc)}m <br> GPS: ${Math.round(gpsHeading)}° | Compass: ${Math.round(compassHeading)}°`;
+
+            if (lastAcc <= 10) {
+                bar.className = 'gps-good';
+                txt.innerText = "GPS READY";
+            } else if (lastAcc <= 20) {
+                bar.className = 'gps-med';
+                txt.innerText = "GPS OKAY";
+            } else {
+                bar.className = 'gps-bad';
+                txt.innerText = "WEAK SIGNAL";
+            }
+        }
+
+        function updateMap(lat, lng) {
             if (map) {
                 if (!userMarker) {
                     userMarker = L.marker([lat, lng]).addTo(map).bindPopup("You");
-                    map.setView([lat, lng], 17);
+                    map.setView([lat, lng], 18);
                 } else {
                     userMarker.setLatLng([lat, lng]);
                 }
             }
-        }, (err) => console.log(err), { enableHighAccuracy: true });
-
-        // 3. SAVE FUNCTION (With Direction!)
-        function saveHazard(type) {
-            navigator.geolocation.getCurrentPosition((pos) => {
-                const point = {
-                    type: type,
-                    lat: pos.coords.latitude,
-                    lng: pos.coords.longitude,
-                    heading: currentHeading || 0, // 0-360 degrees
-                    time: new Date().toISOString()
-                };
-
-                hazards.push(point);
-                
-                // Visual Feedback
-                document.getElementById('status').innerText = `Saved ${type} (Heading: ${Math.round(point.heading)}°)`;
-                if(navigator.vibrate) navigator.vibrate(200);
-
-                // Add to Map immediately
-                if (map) {
-                    const color = type === 'POTHOLE' ? 'red' : 'orange';
-                    L.circleMarker([point.lat, point.lng], { color: color, radius: 8 }).addTo(map)
-                     .bindPopup(`${type}<br>Heading: ${Math.round(point.heading)}°`);
-                }
-
-            }, (err) => alert("GPS Error!"));
         }
 
-        // 4. TAB SWITCHING
+        // --- 4. SAVE FUNCTION (Saves BOTH Headings) ---
+        function saveHazard(type) {
+            // STRICT FILTER: Don't save if accuracy > 15m
+            if (lastAcc > 15) {
+                alert(`Cannot save! GPS accuracy is too low (±${Math.round(lastAcc)}m).\n\nWait for the bar to turn GREEN.`);
+                return;
+            }
+
+            const point = {
+                type: type,
+                lat: lastLat,
+                lng: lastLng,
+                gps_head: gpsHeading || 0,
+                mag_head: compassHeading || 0,
+                acc: lastAcc,
+                time: new Date().toLocaleTimeString()
+            };
+
+            hazards.push(point);
+            
+            document.getElementById('dl-btn').innerText = `Download CSV (${hazards.length} points)`;
+            
+            // Visual feedback
+            const bestHeading = (point.gps_head > 0) ? point.gps_head : point.mag_head;
+            // alert(`Saved ${type}!\nHeading: ${Math.round(bestHeading)}°`); // Optional: Comment out if annoying
+            
+            // Haptic feedback
+            if(navigator.vibrate) navigator.vibrate([100]);
+
+            // Add to Map immediately
+            if (map) {
+                const color = type === 'POTHOLE' ? 'red' : 'orange';
+                L.circleMarker([point.lat, point.lng], { color: color, radius: 8, fillOpacity: 0.8 }).addTo(map)
+                 .bindPopup(`${type}<br>Head: ${Math.round(bestHeading)}°`);
+            }
+        }
+
+        // --- 5. DOWNLOAD CSV (Updated Columns) ---
+        function downloadCSV() {
+            if (hazards.length === 0) { alert("No points collected yet."); return; }
+            
+            let csv = "Type,Lat,Lng,GPS_Heading,Compass_Heading,Accuracy,Time\n";
+            
+            hazards.forEach(h => {
+                csv += `${h.type},${h.lat},${h.lng},${h.gps_head},${h.mag_head},${h.acc},${h.time}\n`;
+            });
+            
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `scan_${new Date().toISOString().slice(0,10)}.csv`;
+            a.click();
+        }
+
+        // --- 6. TAB LOGIC ---
+        function initMap() {
+            if (map) return;
+            // Default center: Bangalore
+            map = L.map('map').setView([12.9716, 77.5946], 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
+        }
+
         function switchTab(tabName) {
             document.querySelectorAll('.screen').forEach(el => el.style.display = 'none');
             document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
@@ -130,23 +238,9 @@
             } else {
                 document.getElementById('map-screen').style.display = 'block';
                 event.target.classList.add('active');
-                initMap(); // Load map only when needed
-                setTimeout(() => map.invalidateSize(), 100); // Fix rendering glitch
+                initMap();
+                setTimeout(() => map.invalidateSize(), 100);
             }
-        }
-
-        // 5. DOWNLOAD CSV
-        function downloadCSV() {
-            let csv = "Type,Lat,Lng,Heading,Time\n";
-            hazards.forEach(h => {
-                csv += `${h.type},${h.lat},${h.lng},${h.heading},${h.time}\n`;
-            });
-            const blob = new Blob([csv], { type: 'text/csv' });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = "my_hazards.csv";
-            a.click();
         }
     </script>
 </body>
