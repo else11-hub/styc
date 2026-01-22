@@ -2,56 +2,150 @@
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <!-- Leaflet Map CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        body { margin: 0; display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
-        button { flex: 1; border: none; font-size: 40px; font-weight: bold; color: white; }
-        #pothole { background-color: #D32F2F; }
-        #bump { background-color: #FBC02D; color: black; }
-        #log { height: 50px; background: #333; color: #fff; text-align: center; line-height: 50px; }
-        #export { position: fixed; bottom: 10px; right: 10px; padding: 10px; background: white; color: black; border-radius: 5px; font-size: 14px; }
+        body { margin: 0; font-family: sans-serif; height: 100vh; display: flex; flex-direction: column; }
+        
+        /* TABS */
+        #tabs { display: flex; height: 50px; background: #333; }
+        .tab { flex: 1; color: white; border: none; background: none; font-size: 18px; font-weight: bold; }
+        .active { background: #555; border-bottom: 4px solid #4CAF50; }
+
+        /* SCREENS */
+        .screen { display: none; flex: 1; height: 100%; }
+        #collect-screen { display: flex; flex-direction: column; }
+        #map-screen { height: 100%; }
+
+        /* COLLECT UI */
+        .big-btn { flex: 1; border: none; font-size: 40px; font-weight: bold; color: white; }
+        #btn-pothole { background-color: #D32F2F; }
+        #btn-bump { background-color: #FBC02D; color: black; }
+        #status { padding: 10px; text-align: center; background: #222; color: #fff; }
+
+        /* MAP UI */
+        #map { height: 100%; width: 100%; }
     </style>
 </head>
 <body>
 
-    <!-- UI -->
-    <div id="log">Ready to Scan...</div>
-    <button id="pothole" onclick="savePoint('POTHOLE')">POTHOLE</button>
-    <button id="bump" onclick="savePoint('BUMP')">BUMP</button>
-    <div id="export" onclick="downloadCSV()">Download CSV</div>
+    <!-- NAVIGATION TABS -->
+    <div id="tabs">
+        <button class="tab active" onclick="switchTab('collect')">COLLECT</button>
+        <button class="tab" onclick="switchTab('map')">VIEW MAP</button>
+    </div>
 
+    <!-- SCREEN 1: COLLECTOR -->
+    <div id="collect-screen" class="screen" style="display: flex;">
+        <div id="status">Ready. GPS Accuracy: <span id="acc">Wait...</span></div>
+        <button class="big-btn" id="btn-pothole" onclick="saveHazard('POTHOLE')">POTHOLE</button>
+        <button class="big-btn" id="btn-bump" onclick="saveHazard('BUMP')">BUMP</button>
+        <button onclick="downloadCSV()" style="padding: 15px; font-size: 16px;">Download CSV</button>
+    </div>
+
+    <!-- SCREEN 2: MAP -->
+    <div id="map-screen" class="screen">
+        <div id="map"></div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        let data = "Type,Lat,Lng,Time\n"; // CSV Header
+        // DATA STORAGE
+        let hazards = []; // Stores {lat, lng, type, heading}
+        let map, userMarker;
+        let currentHeading = 0; // Direction of travel
+        let lastPos = null;
 
-        function savePoint(type) {
-            document.getElementById('log').innerText = "Locating...";
-            
-            // Get GPS
-            navigator.geolocation.getCurrentPosition((position) => {
-                const lat = position.coords.latitude;
-                const lng = position.coords.longitude;
-                const time = new Date().toLocaleTimeString();
-
-                // Save to variable
-                const row = `${type},${lat},${lng},${time}\n`;
-                data += row;
-
-                // Visual Feedback
-                document.getElementById('log').innerText = `Saved: ${type}`;
-                
-                // Haptic Feedback (Vibrate phone)
-                if(navigator.vibrate) navigator.vibrate(200);
-
-            }, (error) => {
-                alert("GPS Error: " + error.message);
-            }, { enableHighAccuracy: true });
+        // 1. INITIALIZE MAP
+        function initMap() {
+            if (map) return; // Already loaded
+            map = L.map('map').setView([12.9716, 77.5946], 15); // Bangalore
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap'
+            }).addTo(map);
         }
 
+        // 2. WATCH GPS (Runs constantly)
+        navigator.geolocation.watchPosition((pos) => {
+            const lat = pos.coords.latitude;
+            const lng = pos.coords.longitude;
+            const acc = pos.coords.accuracy;
+            const speed = pos.coords.speed; // m/s
+            
+            // Calculate Heading (if moving)
+            if (pos.coords.heading) {
+                currentHeading = pos.coords.heading;
+            }
+
+            // Update UI
+            document.getElementById('acc').innerText = Math.round(acc) + "m";
+            
+            // Update Map Marker
+            if (map) {
+                if (!userMarker) {
+                    userMarker = L.marker([lat, lng]).addTo(map).bindPopup("You");
+                    map.setView([lat, lng], 17);
+                } else {
+                    userMarker.setLatLng([lat, lng]);
+                }
+            }
+        }, (err) => console.log(err), { enableHighAccuracy: true });
+
+        // 3. SAVE FUNCTION (With Direction!)
+        function saveHazard(type) {
+            navigator.geolocation.getCurrentPosition((pos) => {
+                const point = {
+                    type: type,
+                    lat: pos.coords.latitude,
+                    lng: pos.coords.longitude,
+                    heading: currentHeading || 0, // 0-360 degrees
+                    time: new Date().toISOString()
+                };
+
+                hazards.push(point);
+                
+                // Visual Feedback
+                document.getElementById('status').innerText = `Saved ${type} (Heading: ${Math.round(point.heading)}°)`;
+                if(navigator.vibrate) navigator.vibrate(200);
+
+                // Add to Map immediately
+                if (map) {
+                    const color = type === 'POTHOLE' ? 'red' : 'orange';
+                    L.circleMarker([point.lat, point.lng], { color: color, radius: 8 }).addTo(map)
+                     .bindPopup(`${type}<br>Heading: ${Math.round(point.heading)}°`);
+                }
+
+            }, (err) => alert("GPS Error!"));
+        }
+
+        // 4. TAB SWITCHING
+        function switchTab(tabName) {
+            document.querySelectorAll('.screen').forEach(el => el.style.display = 'none');
+            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+            
+            if (tabName === 'collect') {
+                document.getElementById('collect-screen').style.display = 'flex';
+                event.target.classList.add('active');
+            } else {
+                document.getElementById('map-screen').style.display = 'block';
+                event.target.classList.add('active');
+                initMap(); // Load map only when needed
+                setTimeout(() => map.invalidateSize(), 100); // Fix rendering glitch
+            }
+        }
+
+        // 5. DOWNLOAD CSV
         function downloadCSV() {
-            const blob = new Blob([data], { type: 'text/csv' });
+            let csv = "Type,Lat,Lng,Heading,Time\n";
+            hazards.forEach(h => {
+                csv += `${h.type},${h.lat},${h.lng},${h.heading},${h.time}\n`;
+            });
+            const blob = new Blob([csv], { type: 'text/csv' });
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = "hazards.csv";
+            a.download = "my_hazards.csv";
             a.click();
         }
     </script>
