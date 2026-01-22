@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
+        button { flex: 1; border: none; font-size: 40px; font-weight: bold; color: white; }
+        #pothole { background-color: #D32F2F; }
+        #bump { background-color: #FBC02D; color: black; }
+        #log { height: 50px; background: #333; color: #fff; text-align: center; line-height: 50px; }
+        #export { position: fixed; bottom: 10px; right: 10px; padding: 10px; background: white; color: black; border-radius: 5px; font-size: 14px; }
+    </style>
+</head>
+<body>
+
+    <!-- UI -->
+    <div id="log">Ready to Scan...</div>
+    <button id="pothole" onclick="savePoint('POTHOLE')">POTHOLE</button>
+    <button id="bump" onclick="savePoint('BUMP')">BUMP</button>
+    <div id="export" onclick="downloadCSV()">Download CSV</div>
+
+    <script>
+        let data = "Type,Lat,Lng,Time\n"; // CSV Header
+
+        function savePoint(type) {
+            document.getElementById('log').innerText = "Locating...";
+            
+            // Get GPS
+            navigator.geolocation.getCurrentPosition((position) => {
+                const lat = position.coords.latitude;
+                const lng = position.coords.longitude;
+                const time = new Date().toLocaleTimeString();
+
+                // Save to variable
+                const row = `${type},${lat},${lng},${time}\n`;
+                data += row;
+
+                // Visual Feedback
+                document.getElementById('log').innerText = `Saved: ${type}`;
+                
+                // Haptic Feedback (Vibrate phone)
+                if(navigator.vibrate) navigator.vibrate(200);
+
+            }, (error) => {
+                alert("GPS Error: " + error.message);
+            }, { enableHighAccuracy: true });
+        }
+
+        function downloadCSV() {
+            const blob = new Blob([data], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = "hazards.csv";
+            a.click();
+        }
+    </script>
+</body>
+</html>
