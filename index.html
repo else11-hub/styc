@@ -33,8 +33,10 @@
         #btn-pothole:active { background-color: #b71c1c; transform: translateY(2px); }
         #btn-bump:active { background-color: #f9a825; transform: translateY(2px); }
 
-        /* DOWNLOAD BUTTON */
-        #dl-btn { height: 60px; background: #333; color: white; border: none; font-size: 16px; font-weight: bold; flex-shrink: 0; }
+        /* FOOTER BUTTONS */
+        #footer { background: #222; padding: 10px; display: flex; gap: 10px; flex-shrink: 0; }
+        #dl-btn { flex: 2; height: 50px; background: #333; color: white; border: none; font-size: 16px; font-weight: bold; border-radius: 4px; }
+        #clear-btn { flex: 1; height: 50px; background: #555; color: #ff8a80; border: none; font-size: 14px; border-radius: 4px; }
 
         /* MAP UI */
         #map { height: 100%; width: 100%; }
@@ -61,7 +63,11 @@
 
         <button class="big-btn" id="btn-pothole" onclick="saveHazard('POTHOLE')">POTHOLE</button>
         <button class="big-btn" id="btn-bump" onclick="saveHazard('BUMP')">SPEED BUMP</button>
-        <button id="dl-btn" onclick="downloadCSV()">Download CSV (0 points)</button>
+        
+        <div id="footer">
+            <button id="dl-btn" onclick="downloadCSV()">Download CSV (0)</button>
+            <button id="clear-btn" onclick="clearData()">Clear All</button>
+        </div>
     </div>
 
     <!-- SCREEN 2: MAP -->
@@ -77,14 +83,23 @@
         let map, userMarker;
         
         // --- SENSOR VARIABLES ---
-        let gpsHeading = 0;      // From Satellite (Course over ground)
-        let compassHeading = 0;  // From Magnetometer (Phone direction)
-        
+        let gpsHeading = 0;      
+        let compassHeading = 0;  
         let lastAcc = 999;
         let lastLat = 0, lastLng = 0;
 
-        // --- 1. WATCH GPS (Position + GPS Bearing) ---
-        // highAccuracy: true forces the GPS chip to turn on
+        // --- 0. LOAD DATA ON STARTUP ---
+        window.onload = function() {
+            const saved = localStorage.getItem('my_hazards');
+            if (saved) {
+                try {
+                    hazards = JSON.parse(saved);
+                    document.getElementById('dl-btn').innerText = `Download CSV (${hazards.length})`;
+                } catch(e) { console.error("Save file corrupted", e); }
+            }
+        };
+
+        // --- 1. WATCH GPS ---
         const gpsOptions = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
         
         navigator.geolocation.watchPosition((pos) => {
@@ -92,7 +107,6 @@
             lastLng = pos.coords.longitude;
             lastAcc = pos.coords.accuracy;
             
-            // GPS Heading only exists if moving > 3km/h
             if (pos.coords.heading !== null && !isNaN(pos.coords.heading)) {
                 gpsHeading = pos.coords.heading;
             }
@@ -105,8 +119,7 @@
             document.getElementById('gps-bar').className = 'gps-bad';
         }, gpsOptions);
 
-        // --- 2. WATCH COMPASS (Phone Orientation) ---
-        // Tries 'absolute' first (Android), falls back to standard (iOS/others)
+        // --- 2. WATCH COMPASS ---
         if (window.DeviceOrientationEvent) {
             window.addEventListener('deviceorientationabsolute', handleOrientation, true); 
             window.addEventListener('deviceorientation', handleOrientation, true);
@@ -114,23 +127,13 @@
 
         function handleOrientation(event) {
             let h = null;
-            
-            // iOS (Webkit)
-            if (event.webkitCompassHeading) {
-                h = event.webkitCompassHeading;
-            } 
-            // Android (Absolute Alpha)
-            else if (event.alpha !== null) {
-                // Convert anti-clockwise alpha to clockwise heading
-                h = 360 - event.alpha; 
-            }
+            if (event.webkitCompassHeading) h = event.webkitCompassHeading;
+            else if (event.alpha !== null) h = 360 - event.alpha; 
 
             if (h !== null) {
                 compassHeading = h % 360;
                 if (compassHeading < 0) compassHeading += 360;
             }
-            // Note: We don't call updateUI() here to save battery. 
-            // The UI updates only when GPS updates (approx 1Hz).
         }
 
         // --- 3. UI UPDATER ---
@@ -139,7 +142,6 @@
             const txt = document.getElementById('gps-text');
             const det = document.getElementById('gps-details');
 
-            // Display both headings for debugging
             det.innerHTML = `Acc: ±${Math.round(lastAcc)}m <br> GPS: ${Math.round(gpsHeading)}° | Compass: ${Math.round(compassHeading)}°`;
 
             if (lastAcc <= 10) {
@@ -165,9 +167,8 @@
             }
         }
 
-        // --- 4. SAVE FUNCTION (Saves BOTH Headings) ---
+        // --- 4. SAVE FUNCTION (PERSISTENT) ---
         function saveHazard(type) {
-            // STRICT FILTER: Don't save if accuracy > 15m
             if (lastAcc > 15) {
                 alert(`Cannot save! GPS accuracy is too low (±${Math.round(lastAcc)}m).\n\nWait for the bar to turn GREEN.`);
                 return;
@@ -185,29 +186,31 @@
 
             hazards.push(point);
             
-            document.getElementById('dl-btn').innerText = `Download CSV (${hazards.length} points)`;
+            // SAVE PERMANENTLY
+            localStorage.setItem('my_hazards', JSON.stringify(hazards));
             
-            // Visual feedback
-            const bestHeading = (point.gps_head > 0) ? point.gps_head : point.mag_head;
-            // alert(`Saved ${type}!\nHeading: ${Math.round(bestHeading)}°`); // Optional: Comment out if annoying
+            document.getElementById('dl-btn').innerText = `Download CSV (${hazards.length})`;
             
-            // Haptic feedback
             if(navigator.vibrate) navigator.vibrate([100]);
 
-            // Add to Map immediately
-            if (map) {
-                const color = type === 'POTHOLE' ? 'red' : 'orange';
-                L.circleMarker([point.lat, point.lng], { color: color, radius: 8, fillOpacity: 0.8 }).addTo(map)
-                 .bindPopup(`${type}<br>Head: ${Math.round(bestHeading)}°`);
-            }
+            // Add to map immediately
+            addMarkerToMap(point);
         }
 
-        // --- 5. DOWNLOAD CSV (Updated Columns) ---
+        // --- HELPER: Add Marker ---
+        function addMarkerToMap(point) {
+            if (!map) return;
+            const color = point.type === 'POTHOLE' ? 'red' : 'orange';
+            const head = point.gps_head || point.mag_head || 0;
+            L.circleMarker([point.lat, point.lng], { color: color, radius: 8, fillOpacity: 0.8 }).addTo(map)
+             .bindPopup(`${point.type}<br>Head: ${Math.round(head)}°`);
+        }
+
+        // --- 5. DOWNLOAD CSV ---
         function downloadCSV() {
             if (hazards.length === 0) { alert("No points collected yet."); return; }
             
             let csv = "Type,Lat,Lng,GPS_Heading,Compass_Heading,Accuracy,Time\n";
-            
             hazards.forEach(h => {
                 csv += `${h.type},${h.lat},${h.lng},${h.gps_head},${h.mag_head},${h.acc},${h.time}\n`;
             });
@@ -220,12 +223,24 @@
             a.click();
         }
 
-        // --- 6. TAB LOGIC ---
+        // --- 6. CLEAR DATA ---
+        function clearData() {
+            if(confirm("Delete ALL saved points? This cannot be undone.")) {
+                hazards = [];
+                localStorage.removeItem('my_hazards');
+                document.getElementById('dl-btn').innerText = "Download CSV (0)";
+                location.reload(); // Reload to clear map visual
+            }
+        }
+
+        // --- 7. TAB LOGIC ---
         function initMap() {
             if (map) return;
-            // Default center: Bangalore
             map = L.map('map').setView([12.9716, 77.5946], 13);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
+            
+            // Load all old points
+            hazards.forEach(point => addMarkerToMap(point));
         }
 
         function switchTab(tabName) {
